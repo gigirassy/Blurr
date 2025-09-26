@@ -1,3 +1,4 @@
+// main.go - corrected, robust-ish no-JS speed test
 package main
 
 import (
@@ -51,10 +52,11 @@ func root(w http.ResponseWriter, r *http.Request) {
 	io.WriteString(w, `<!doctype html><html><head><meta charset="utf-8"><title>tiny-speedtest</title></head><body>
 	<h2>tiny-speedtest (no JS)</h2>
 	<form method="POST" action="/start"><input type="hidden" name="ip" value="`+ip+`"><button>Start test</button></form>
-	<p>Download test serves ~4MiB; upload uses a file you select.</p>
+	<p>Download test default: 8 MiB. If automatic download doesn't start, click the link on the next page.</p>
 	</body></html>`)
 }
 
+// start: create session and respond with a page that meta-refreshes to the first probe
 func start(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad request", 400)
@@ -66,9 +68,13 @@ func start(w http.ResponseWriter, r *http.Request) {
 	s.ClientHost = r.FormValue("ip")
 	s.LastSent = time.Now()
 	s.mu.Unlock()
-	http.Redirect(w, r, "/probe?sid="+sid+"&n=1", http.StatusFound)
+	// quick page that sends client to first probe via meta-refresh (no redirect loops)
+	html := `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=/probe?sid=` + sid + `&n=1"></head><body>Starting…</body></html>`
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(html))
 }
 
+// probe: count probes via a simple meta-refresh chain; final page starts download via iframe + link
 func probe(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	sid := q.Get("sid")
@@ -89,36 +95,45 @@ func probe(w http.ResponseWriter, r *http.Request) {
 
 	if n < 8 {
 		next := n + 1
-		http.Redirect(w, r, "/probe?sid="+sid+"&n="+strconv.Itoa(next), http.StatusFound)
+		// short meta-refresh to next probe step
+		html := `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=/probe?sid=` + sid + `&n=` + strconv.Itoa(next) + `"></head><body>ping ` + strconv.Itoa(n) + `</body></html>`
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write([]byte(html))
 		return
 	}
 
-	// final probe -> render a page that contains a non-cached, nonce'd image URL which will force a new HTTP fetch
-	nonce := strconv.FormatInt(time.Now().UnixNano(), 36)
+	// final probe: produce a page that includes a nonce'd download URL, an iframe to trigger fetch,
+	// and a visible link (fallback) — avoids caching and gives manual fallback for picky browsers.
+	nonce := mkid()
 	size := 8 * 1024 * 1024
+	dl := "/download?sid=" + sid + "&size=" + strconv.Itoa(size) + "&nonce=" + nonce
 	html := `<!doctype html><html><head><meta charset="utf-8"><title>download</title></head><body>
 	<h3>Starting download test</h3>
-	<!-- nonce prevents caching; browser will fetch the resource -->
-	<img src="/download?sid=` + sid + `&size=` + strconv.Itoa(size) + `&nonce=` + nonce + `" style="display:none">
-	<p>If the image doesn't start automatically, click <a href="/download?sid=` + sid + `&size=` + strconv.Itoa(size) + `&nonce=` + nonce + `">here</a> to start it.</p>
-	<p>Results will appear after the server finishes the download.</p>
+	<p>If download does not start automatically, click the link below.</p>
+	<p><a href="` + dl + `">Click here to download test file</a></p>
+	<!-- hidden iframe: most browsers will fetch the src; some tiny browsers may not -->
+	<iframe src="` + dl + `" style="display:none"></iframe>
+	<p>Results page will appear after the server records the download (or after a short timeout).</p>
+	<meta http-equiv="refresh" content="1;url=/results?sid=` + sid + `">
 	</body></html>`
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write([]byte(html))
 }
 
+// download: stream bytes, prevent caching, record server-side bps and log it
 func download(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	sid := q.Get("sid")
 	size, _ := strconv.Atoi(q.Get("size"))
 	if size <= 0 {
-		size = 8 * 1024 * 1024 // default 8MiB
+		size = 8 * 1024 * 1024
 	}
 
-	// prevent caching by browsers / proxies
+	// prevent caches/proxies from serving cached payload
 	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
 	w.Header().Set("Pragma", "no-cache")
 	w.Header().Set("Expires", "0")
+	// set content-type octet-stream; we provide an iframe + link fallback so browsers will fetch the resource
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", strconv.Itoa(size))
 
@@ -136,6 +151,7 @@ func download(w http.ResponseWriter, r *http.Request) {
 		}
 		n, err := w.Write(chunk[:to])
 		if err != nil {
+			// client closed; break
 			break
 		}
 		bw += n
@@ -149,22 +165,19 @@ func download(w http.ResponseWriter, r *http.Request) {
 	}
 	bps := float64(bw) / elapsed
 
-	// store measurement
 	if sid != "" {
 		s := idxGet(sid)
 		s.mu.Lock()
 		s.DownloadB = bps
 		s.mu.Unlock()
 	}
-
-	// log server-side result for debugging
-	log.Printf("download done sid=%s bytes=%d elapsed=%.3fs bps=%.2fMB/s\n", sid, bw, elapsed, bps/1024/1024)
+	log.Printf("download done sid=%s bytes=%d elapsed=%.3fs bps=%.3fMiB/s\n", sid, bw, elapsed, bps/1024/1024)
 }
 
+// upload: same as before, measure time to receive uploaded file(s)
 func upload(w http.ResponseWriter, r *http.Request) {
-	// accept multipart/form-data file upload
 	if err := r.ParseMultipartForm(32 << 20); err != nil && err != http.ErrNotMultipart {
-		// still attempt to read body
+		// continue even if not multipart
 	}
 	sid := r.FormValue("sid")
 	if sid == "" {
@@ -198,6 +211,7 @@ func upload(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/results?sid="+sid, http.StatusSeeOther)
 }
 
+// results: wait for download measurement (poll) up to timeout, then render
 func results(w http.ResponseWriter, r *http.Request) {
 	sid := r.URL.Query().Get("sid")
 	if sid == "" {
@@ -206,24 +220,22 @@ func results(w http.ResponseWriter, r *http.Request) {
 	}
 	s := idxGet(sid)
 
-	// wait up to waitTimeout for download to complete (i.e., s.DownloadB > 0)
-	waitTimeout := 20 * time.Second
-	poll := 100 * time.Millisecond
+	waitTimeout := 30 * time.Second
+	poll := 150 * time.Millisecond
 	deadline := time.Now().Add(waitTimeout)
+
 	for {
 		s.mu.Lock()
+		pings := append([]float64(nil), s.Pings...)
 		download := s.DownloadB
 		upload := s.UploadB
-		pings := append([]float64(nil), s.Pings...)
 		client := s.ClientHost
 		s.mu.Unlock()
 
-		// if we have a download measurement or timed out, render results
 		if download > 0 || time.Now().After(deadline) {
 			if client == "" {
 				client = getIP(r)
 			}
-			// compute avg & jitter
 			var avg, sd float64
 			if len(pings) > 0 {
 				for _, v := range pings {
@@ -248,7 +260,6 @@ func results(w http.ResponseWriter, r *http.Request) {
 			</form><p><a href="/">Run again</a></p></body></html>`)
 			return
 		}
-		// otherwise sleep a bit and poll again
 		time.Sleep(poll)
 	}
 }
