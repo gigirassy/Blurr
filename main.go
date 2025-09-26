@@ -25,7 +25,7 @@ func root(w http.ResponseWriter, r *http.Request) {
 	ip := getIP(r)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	io.WriteString(w, `<!doctype html>
-<html><head><meta charset="utf-8"><title>tiny-speedtest (JS primary)</title>
+<html><head><meta charset="utf-8"><title>Blurr (JS primary)</title>
 <style>body{font-family:system-ui,Segoe UI,Roboto,Arial;max-width:760px;margin:1rem}</style>
 </head><body>
 <h2>tiny-speedtest</h2>
