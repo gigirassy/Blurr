@@ -1,2 +1,2 @@
 # Blurr
-simple, hyper-lightweight, javascript-free speedtest written in go
+Blurr is a simple, hyper-lightweight, Javascript-free speedtest written in Go. It uses meta-refresh for measurement.
