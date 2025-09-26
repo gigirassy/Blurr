@@ -66,7 +66,7 @@ func start(w http.ResponseWriter, r *http.Request) {
 	s.ClientHost = r.FormValue("ip")
 	s.LastSent = time.Now()
 	s.mu.Unlock()
-	io.WriteString(w, `<!doctype html><html><head><meta http-equiv="refresh" content="0;url=/probe?sid=`+sid+`&n=1"></head><body>Starting…</body></html>`)
+	http.Redirect(w, r, "/probe?sid="+sid+"&n=1", http.StatusFound)
 }
 
 func probe(w http.ResponseWriter, r *http.Request) {
@@ -80,9 +80,8 @@ func probe(w http.ResponseWriter, r *http.Request) {
 	s := idxGet(sid)
 	now := time.Now()
 	s.mu.Lock()
-	var delta float64
 	if !s.LastSent.IsZero() {
-		delta = now.Sub(s.LastSent).Seconds() * 1000
+		delta := now.Sub(s.LastSent).Seconds() * 1000
 		s.Pings = append(s.Pings, delta)
 	}
 	s.LastSent = now
@@ -90,15 +89,22 @@ func probe(w http.ResponseWriter, r *http.Request) {
 
 	if n < 8 {
 		next := n + 1
-		io.WriteString(w, `<!doctype html><html><head><meta http-equiv="refresh" content="0;url=/probe?sid=`+sid+`&n=`+strconv.Itoa(next)+`"></head><body>ping `+strconv.Itoa(n)+` `+strconv.FormatFloat(delta, 'f', 2, 64)+`ms</body></html>`)
+		http.Redirect(w, r, "/probe?sid="+sid+"&n="+strconv.Itoa(next), http.StatusFound)
 		return
 	}
-	// finish probes, start download via embedded image, then go to results
-	io.WriteString(w, `<!doctype html><html><head><meta http-equiv="refresh" content="2;url=/results?sid=`+sid+`"></head><body>
-	<h3>Probes done — initiating download test</h3>
-	<img src="/download?sid=`+sid+`&size=4194304" style="display:none">
-	<p>Waiting for results...</p>
-	</body></html>`)
+
+	// final probe -> render a page that contains a non-cached, nonce'd image URL which will force a new HTTP fetch
+	nonce := strconv.FormatInt(time.Now().UnixNano(), 36)
+	size := 8 * 1024 * 1024
+	html := `<!doctype html><html><head><meta charset="utf-8"><title>download</title></head><body>
+	<h3>Starting download test</h3>
+	<!-- nonce prevents caching; browser will fetch the resource -->
+	<img src="/download?sid=` + sid + `&size=` + strconv.Itoa(size) + `&nonce=` + nonce + `" style="display:none">
+	<p>If the image doesn't start automatically, click <a href="/download?sid=` + sid + `&size=` + strconv.Itoa(size) + `&nonce=` + nonce + `">here</a> to start it.</p>
+	<p>Results will appear after the server finishes the download.</p>
+	</body></html>`
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(html))
 }
 
 func download(w http.ResponseWriter, r *http.Request) {
@@ -106,12 +112,18 @@ func download(w http.ResponseWriter, r *http.Request) {
 	sid := q.Get("sid")
 	size, _ := strconv.Atoi(q.Get("size"))
 	if size <= 0 {
-		size = 8 * 1024 * 1024 // 8MiB default (bigger than before)
+		size = 8 * 1024 * 1024 // default 8MiB
 	}
-	start := time.Now()
+
+	// prevent caching by browsers / proxies
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Expires", "0")
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", strconv.Itoa(size))
-	chunk := make([]byte, 64*1024) // 64KB chunks
+
+	start := time.Now()
+	chunk := make([]byte, 64*1024)
 	for i := range chunk {
 		chunk[i] = 'a'
 	}
@@ -136,12 +148,17 @@ func download(w http.ResponseWriter, r *http.Request) {
 		elapsed = 1e-9
 	}
 	bps := float64(bw) / elapsed
+
+	// store measurement
 	if sid != "" {
 		s := idxGet(sid)
 		s.mu.Lock()
 		s.DownloadB = bps
 		s.mu.Unlock()
 	}
+
+	// log server-side result for debugging
+	log.Printf("download done sid=%s bytes=%d elapsed=%.3fs bps=%.2fMB/s\n", sid, bw, elapsed, bps/1024/1024)
 }
 
 func upload(w http.ResponseWriter, r *http.Request) {
