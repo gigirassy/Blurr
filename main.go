@@ -3,7 +3,6 @@ package main
 import (
 	"io"
 	"log"
-	"math"
 	"net"
 	"net/http"
 	"strconv"
