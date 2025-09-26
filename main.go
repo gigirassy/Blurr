@@ -28,7 +28,7 @@ func root(w http.ResponseWriter, r *http.Request) {
 <html><head><meta charset="utf-8"><title>Blurr (JS primary)</title>
 <style>body{font-family:system-ui,Segoe UI,Roboto,Arial;max-width:760px;margin:1rem}</style>
 </head><body>
-<h2>tiny-speedtest</h2>
+<h2>Blurr</h2>
 <p>Host: `+ip+`</p>
 <div id=out>Click <button id=start>Start test</button> to run. JS required for automatic test; no-JS fallback links below.</div>
 
@@ -123,6 +123,7 @@ $("start").onclick = async ()=>{
   }
 };
 </script>
+<span>Donations are not needed. Instead, <a href="https://github.com/gigirassy/Blurr/">consider contributing to the CC0 code</a>.</span>
 </body></html>`)
 }
 
